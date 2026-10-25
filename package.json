@@ -1,7 +1,7 @@
 {
   "name": "pi-voice",
   "version": "0.1.0",
-  "description": "Voice dictation for Pi using WSLg audio capture and Groq Whisper",
+  "description": "Voice dictation for Pi using WSLg audio capture, Groq Whisper, or Deepgram",
   "keywords": ["pi-package"],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

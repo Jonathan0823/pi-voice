@@ -1,8 +1,8 @@
 # pi-voice
 
-Voice dictation for [Pi](https://github.com/earendil-works/pi), using Groq Whisper for transcription.
+Voice dictation for [Pi](https://github.com/earendil-works/pi), using Groq Whisper or Deepgram for transcription.
 
-Speak into Pi’s editor, stop recording, and insert the completed transcript at the cursor. Dictation does not submit your prompt.
+Speak into Pi, stop recording, and insert the completed transcript at the cursor. Dictation does not submit your prompt.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ Speak into Pi’s editor, stop recording, and insert the completed transcript at
   ```bash
   sudo apt update && sudo apt install pulseaudio-utils
   ```
-- A Groq API key with access to the speech-to-text API.
+- An API key for the selected provider: `GROQ_API_KEY` or `DEEPGRAM_API_KEY`.
 
 The recorder uses the system’s default PulseAudio source. In WSLg, check it with `pactl get-default-source`.
 
@@ -24,9 +24,9 @@ pi install git:github.com/Jonathan0823/pi-voice
 
 Restart Pi or run `/reload` after installing.
 
-## Configure Groq
+## Configure providers
 
-Create an API key in the [Groq Console](https://console.groq.com/keys). In the WSL shell that launches Pi, set it without echoing it to the terminal:
+Set the API key in the WSL shell that launches Pi. The key is read from the process environment and is never written to the voice config file.
 
 ```bash
 read -rsp "Groq API key: " GROQ_API_KEY
@@ -34,12 +34,18 @@ printf '\n'
 export GROQ_API_KEY
 ```
 
-For future shells, add `export GROQ_API_KEY="your-key"` to `~/.bashrc`, then run `source ~/.bashrc`. Keep that file private and out of source control.
+Or set `DEEPGRAM_API_KEY` instead (or set both to switch between providers). For future shells, add the desired `export ...` line to `~/.bashrc`, then run `source ~/.bashrc`. Keep that file private and out of source control.
+
+Run `/voice-provider` to choose Groq or Deepgram, then choose a model. The picker requests current models from the selected provider and filters to speech-to-text models usable for English batch transcription. If the key is missing or the request fails, it shows built-in choices: Groq `whisper-large-v3-turbo` / `whisper-large-v3`, or Deepgram `nova-3` / `nova-2`.
+
+The selected provider and a separate model choice for each provider are stored globally in `~/.config/pi-voice/config.json`. Defaults are Groq with `whisper-large-v3-turbo` and Deepgram with `nova-3`. The config contains preferences only, never API keys.
 
 ## Use
 
 - **Alt+M** — start recording; press again to stop and transcribe.
 - **Alt+N** — cancel and discard the current dictation.
+- **`/voice-provider`** — choose the provider and its model.
+- **`/voice-recover`** — insert the most recent unrecovered transcript into the main editor.
 
 While recording, the status line shows a six-bar microphone-level meter. After stopping, Pi shows a transcription status and inserts the finished English transcript at the cursor. Audio is collected while you speak; partial text is not streamed into the editor.
 
@@ -51,13 +57,14 @@ The package works with Pi’s main editor on its own. Popup editors need a coope
 
 ## Audio and privacy
 
-The extension captures 16 kHz, mono, signed 16-bit audio through `parec`, keeps it in memory, and uploads it to Groq’s transcription API when you stop. It does not save audio files. Groq receives the audio to produce the transcript; do not use dictation for content you do not want sent to that service.
+The extension captures 16 kHz, mono, signed 16-bit audio through `parec`, keeps it in memory, and uploads it to the selected provider when you stop. It does not save audio files. The provider receives the audio to produce the transcript; do not use dictation for content you do not want sent to that service.
 
-The selected model is `whisper-large-v3-turbo`, with English specified as the input language. The current implementation does not provide local transcription or live partial results.
+Groq transcription uses `whisper-large-v3-turbo` by default; Deepgram uses `nova-3`. The current implementation does not provide local transcription or live partial results.
 
 ## Troubleshooting
 
-- **`GROQ_API_KEY` is not set:** Pi only sees environment variables inherited by the shell that launched it. Set the key in the WSL shell, then restart Pi.
+- **API key is not set:** Pi only sees environment variables inherited by the shell that launched it. Set the selected provider’s key in that shell, then restart Pi.
+- **Model list cannot be fetched:** the picker falls back to its built-in models. Check the key and network connection if you expected newer models.
 - **`parec` is missing:** install `pulseaudio-utils` in Ubuntu/WSL.
 - **`parec: Stream error: No such entity`:** the extension uses the default PulseAudio source automatically. Check `pactl get-default-source` and `pactl list short sources`; do not pass the literal name `default` as a source device.
 - **No microphone level while speaking:** verify WSLg audio is available and that the default source is the intended microphone. `pactl info` shows the PulseAudio server connection.
@@ -82,4 +89,4 @@ bun build index.ts --target=bun \
   --outdir /tmp/pi-voice-build
 ```
 
-The audio-meter test currently lives in the pi-config repository rather than this standalone package repository.
+Run extension unit tests with `bun test` from this directory. The audio-meter test currently lives in the pi-config repository rather than this standalone package repository.

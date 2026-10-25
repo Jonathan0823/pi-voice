@@ -2,6 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { isKeyRelease, isKeyRepeat, Key, matchesKey } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { METER_CELLS, rmsFromPcm16, rmsToBlock } from "./audio-meter.ts";
+import { DEFAULT_CONFIG, loadConfig, saveConfig, type Provider, type VoiceConfig } from "./config.ts";
+import { fetchModels, PROVIDERS, transcribe as transcribeAudio } from "./providers.ts";
 
 const CHANNEL = "pi-voice";
 const SAMPLE_RATE = 16_000;
@@ -40,6 +42,8 @@ export default function (pi: ExtensionAPI) {
 	let meter: NodeJS.Timeout | undefined;
 	let timer: NodeJS.Timeout | undefined;
 	let transcriptionAbort: AbortController | undefined;
+	let voiceConfig: VoiceConfig = structuredClone(DEFAULT_CONFIG);
+	let recordingConfig: VoiceConfig | undefined;
 
 	const status = (text: string | undefined) => ctx?.ui.setStatus("pi-voice", text);
 	const cleanup = () => {
@@ -53,6 +57,7 @@ export default function (pi: ExtensionAPI) {
 		chunks = [];
 		bytes = 0;
 		target = undefined;
+		recordingConfig = undefined;
 		stopped = false;
 	};
 
@@ -66,10 +71,11 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify("Recovered dictation into the main editor", "info");
 	};
 
-	const transcribe = async (audio: Buffer, originalTarget: Target | undefined) => {
-		const apiKey = process.env.GROQ_API_KEY;
+	const transcribe = async (audio: Buffer, originalTarget: Target | undefined, selection: VoiceConfig) => {
+		const provider = selection.provider;
+		const apiKey = process.env[PROVIDERS[provider].keyEnv];
 		if (!apiKey || !ctx) {
-			ctx?.ui.notify("Set GROQ_API_KEY in the environment running Pi", "error");
+			ctx?.ui.notify(`Set ${PROVIDERS[provider].keyEnv} in the environment running Pi`, "error");
 			cleanup();
 			return;
 		}
@@ -77,21 +83,7 @@ export default function (pi: ExtensionAPI) {
 		status("⠋ transcribing…");
 		transcriptionAbort = new AbortController();
 		try {
-			const body = new FormData();
-			body.append("file", new Blob([audio], { type: "audio/wav" }), "dictation.wav");
-			body.append("model", "whisper-large-v3-turbo");
-			body.append("language", "en");
-			body.append("response_format", "json");
-			const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-				method: "POST",
-				headers: { Authorization: `Bearer ${apiKey}` },
-				body,
-				signal: AbortSignal.any([transcriptionAbort.signal, AbortSignal.timeout(60_000)]),
-			});
-			if (!response.ok) throw new Error(`Groq returned HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-			const result: unknown = await response.json();
-			const text = typeof result === "object" && result !== null && "text" in result && typeof result.text === "string" ? result.text.trim() : "";
-			if (!text) throw new Error("Groq returned an empty transcript");
+			const text = await transcribeAudio(provider, apiKey, selection.models[provider], audio, AbortSignal.any([transcriptionAbort.signal, AbortSignal.timeout(60_000)]));
 			if (originalTarget?.insert(text)) {
 				latestTranscript = undefined;
 			} else {
@@ -114,6 +106,7 @@ export default function (pi: ExtensionAPI) {
 		const proc = recorder;
 		const chunksAtStop = chunks;
 		const originalTarget = target;
+		const selection = recordingConfig ?? voiceConfig;
 		proc.once("close", () => {
 			if (!ctx || phase !== "transcribing") return;
 			if (bytes === 0) {
@@ -121,18 +114,21 @@ export default function (pi: ExtensionAPI) {
 				cleanup();
 				return;
 			}
-			void transcribe(wav(Buffer.concat(chunksAtStop)), originalTarget);
+			void transcribe(wav(Buffer.concat(chunksAtStop)), originalTarget, selection);
 		});
 		proc.kill("SIGTERM");
 	};
 
 	const start = () => {
 		if (!ctx || phase !== "idle") return;
-		if (!process.env.GROQ_API_KEY) {
-			ctx.ui.notify("Set GROQ_API_KEY in the environment running Pi", "error");
+		const selection = structuredClone(voiceConfig);
+		const provider = selection.provider;
+		if (!process.env[PROVIDERS[provider].keyEnv]) {
+			ctx.ui.notify(`Set ${PROVIDERS[provider].keyEnv} in the environment running Pi`, "error");
 			return;
 		}
 		chunks = [];
+		recordingConfig = selection;
 		bytes = 0;
 		latestLevel = 0;
 		const meterValues = new Array<number>(METER_CELLS).fill(0);
@@ -141,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 		let popupTarget: Target | undefined;
 		pi.events.emit(`${CHANNEL}:capture`, { setTarget: (insert: (text: string) => boolean) => { popupTarget = { kind: "editor", insert }; } });
 		target = popupTarget ?? { kind: "editor", insert: (text) => {
-			if (!ctx || !process.env.GROQ_API_KEY) return false;
+			if (!ctx) return false;
 			ctx.ui.pasteToEditor(text);
 			return true;
 		} };
@@ -162,7 +158,7 @@ export default function (pi: ExtensionAPI) {
 		recorder.stdout?.on("data", (chunk: Buffer) => {
 			latestLevel = rmsFromPcm16(chunk);
 			if (bytes + chunk.length > MAX_AUDIO_BYTES) {
-				ctx?.ui.notify("Recording reached Groq’s 24 MiB upload limit; finishing now", "warning");
+				ctx?.ui.notify("Recording reached the 24 MiB upload limit; finishing now", "warning");
 				stop();
 				return;
 			}
@@ -178,8 +174,9 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
-	pi.on("session_start", (_event, sessionCtx) => {
+	pi.on("session_start", async (_event, sessionCtx) => {
 		ctx = sessionCtx;
+		voiceConfig = await loadConfig();
 		if (ctx.mode !== "tui") return;
 		ctx.ui.onTerminalInput((data) => {
 			if (isKeyRelease(data) || isKeyRepeat(data)) return;
@@ -198,6 +195,38 @@ export default function (pi: ExtensionAPI) {
 			}
 			return undefined;
 		});
+	});
+
+	pi.registerCommand("voice-provider", {
+		description: "Choose the voice transcription provider and model",
+		handler: async () => {
+			if (!ctx) return;
+			const providerLabel = await ctx.ui.select("Choose voice provider", ["Groq", "Deepgram"]);
+			if (!providerLabel) return;
+			const provider: Provider = providerLabel === "Deepgram" ? "deepgram" : "groq";
+			const key = process.env[PROVIDERS[provider].keyEnv];
+			let models = PROVIDERS[provider].fallback;
+			if (key) {
+				try {
+					models = await fetchModels(provider, key);
+				} catch (error) {
+					ctx.ui.notify(`Could not fetch ${PROVIDERS[provider].label} models; showing built-in choices. ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+			} else {
+				ctx.ui.notify(`${PROVIDERS[provider].keyEnv} is not set; showing built-in model choices.`, "warning");
+			}
+			const model = await ctx.ui.select(`Choose ${PROVIDERS[provider].label} model`, models);
+			if (!model) return;
+			const previous = voiceConfig;
+			voiceConfig = { provider, models: { ...voiceConfig.models, [provider]: model } };
+			try {
+				await saveConfig(voiceConfig);
+				ctx.ui.notify(`Voice transcription set to ${PROVIDERS[provider].label} / ${model}`, "info");
+			} catch (error) {
+				voiceConfig = previous;
+				ctx.ui.notify(`Could not save voice settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
 	});
 
 	pi.registerCommand("voice-recover", {
