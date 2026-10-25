@@ -1,0 +1,13 @@
+{
+  "name": "pi-voice",
+  "version": "0.1.0",
+  "description": "Voice dictation for Pi using WSLg audio capture and Groq Whisper",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
